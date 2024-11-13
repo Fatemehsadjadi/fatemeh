@@ -1,0 +1,170 @@
+import os
+import numpy as np
+import networkx as nx
+import pickle
+import psutil  # Import psutil for memory usage measurement
+import random
+import time
+
+# Read the dataset and select 100,000 random rows
+file_path = r'C:\Users\fsadjadi\Downloads\cit-Patents\cit-Patents-CDLP'
+with open(file_path, 'r') as f:
+    lines = f.readlines()
+
+# Randomly select 100,000 rows
+subset_lines = random.sample(lines, k=100)
+print("subset_lines is:", subset_lines)
+# Create the initial graph
+initial_graph = nx.Graph()
+for line in subset_lines:
+    node1, node2 = line.split()
+    initial_graph.add_edge(node1, node2)
+
+# Save the initial graph to a file
+with open('initial_graph.pkl', 'wb') as f:
+    pickle.dump(initial_graph, f)
+
+# Function to extract subgraph using BFS with a specified maximum number of nodes
+#def extract_subgraph(graph, start_node, max_nodes=15):
+   # subgraph_nodes = set()
+   # queue = [start_node]
+   # while queue:
+    #    node = queue.pop(0)
+     #   if node not in subgraph_nodes and node in graph:  # Check if node exists in graph
+      #      subgraph_nodes.add(node)
+      #      neighbors = list(graph.neighbors(node))
+       #     np.random.shuffle(neighbors)  # Shuffle to randomize selection of neighbors
+       #     queue.extend(neighbors)
+        #    if len(subgraph_nodes) >= max_nodes:
+        #        break
+  #  return graph.subgraph(subgraph_nodes)
+def extract_subgraph(graph, start_node, max_nodes=10):
+    subgraph_nodes = set()
+    queue = [start_node]
+    while queue and len(subgraph_nodes) < max_nodes:
+        node = queue.pop(0)
+        if node not in subgraph_nodes and node in graph:  # Check if node exists in graph
+            subgraph_nodes.add(node)
+            neighbors = list(graph.neighbors(node))
+            np.random.shuffle(neighbors)  # Shuffle to randomize selection of neighbors
+            queue.extend(neighbors)
+    return graph.subgraph(subgraph_nodes)
+# Extract three subgraphs from the sampled graph
+query_subgraphs = []
+total_nodes = 0
+for start_node in np.random.choice(list(initial_graph.nodes()), size=10, replace=False):
+    if start_node not in initial_graph:
+        continue  # Skip if start node not present in graph
+    subgraph = extract_subgraph(initial_graph, start_node, max_nodes=10)
+    query_subgraphs.append(subgraph)
+    total_nodes += len(subgraph.nodes())
+
+# Create a directory to save subgraphs if it doesn't exist
+subgraph_dir = 'subgraphs'
+os.makedirs(subgraph_dir, exist_ok=True)
+
+
+# Merge the subgraphs into a single graph
+def merge_graphs(graphs):
+    merge_graphs = nx.Graph()
+    for subgraph in graphs:
+        merge_graphs.add_nodes_from(subgraph.nodes(data=True))
+        merge_graphs.add_edges_from(subgraph.edges(data=True))
+    return merge_graphs
+
+merge_graph = merge_graphs(query_subgraphs)
+
+def compute_max_path_lengths(initial_graph, merge_graph):
+    max_path_lengths = {}
+    for node in merge_graph.nodes():
+        max_path_length = 0
+        for other_node in initial_graph.nodes():
+            if node != other_node:
+                try:
+                    path_length = nx.shortest_path_length(initial_graph, node, other_node)
+                    if path_length > max_path_length:
+                        max_path_length = path_length
+                except nx.NetworkXNoPath:
+                    pass
+        max_path_lengths[node] = max_path_length
+    return max_path_lengths
+
+def count_vertices_with_same_label(initial_graph, merge_graph):
+    count_dict = {}
+    for node in merge_graph.nodes():
+        label = node  # Node ID is used as the label
+        count = sum(1 for n in initial_graph.nodes() if n == label)
+        count_dict[node] = count
+    return count_dict
+
+def sort_vertices_by_metric(initial_graph, merge_graph):
+    # Select vertices from the initial graph that are present in the merged graph
+    common_vertices = set(initial_graph.nodes()).intersection(merge_graph.nodes())
+    
+    sorted_vertices = {}
+    max_path_lengths = compute_max_path_lengths(initial_graph, merge_graph)
+    count_dict = count_vertices_with_same_label(initial_graph, merge_graph)
+    
+    for node in common_vertices:
+        max_path_length = max_path_lengths.get(node, 0)
+        n_vu = count_dict.get(node, 0)
+        sorted_vertices[node] = n_vu * max_path_length
+    
+    return sorted(sorted_vertices.items(), key=lambda x: x[1], reverse=True)
+
+###########################################################
+def find_subgraphs(initial_graph, merge_graph):
+    sorted_vertices = sort_vertices_by_metric(initial_graph, merge_graph)
+    visited = set()
+    subgraphs = []
+
+    # Measure memory usage only during this function
+    memory_usage = get_memory_usage()
+    while merge_graph.number_of_nodes() > 0:
+        # Find a valid start vertex
+        start_vertex = None
+        start_vertex_id = None  # Store the ID of the start vertex
+        for vertex, _ in sorted_vertices:
+            if vertex not in visited and vertex in merge_graph:
+                if start_vertex_id is None:
+                    start_vertex = vertex
+                    start_vertex_id = vertex
+                elif vertex == start_vertex_id:
+                    start_vertex = vertex
+                    break  # Break if a vertex with the same ID is found
+        if start_vertex is None:
+            break  # No valid start vertex found
+
+        visited.add(start_vertex)
+        subgraph_nodes = nx.node_connected_component(merge_graph, start_vertex)
+        subgraph = initial_graph.subgraph(subgraph_nodes)
+        subgraphs.append(subgraph)
+
+        merge_graph.remove_nodes_from(subgraph_nodes)
+
+    return subgraphs, memory_usage
+
+def get_memory_usage():
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / (1024 * 1024)  # Convert bytes to MB
+
+def measure_time(func):
+    def wrapper(*args, **kwargs):
+        start_time = time.perf_counter()  # Use perf_counter for higher precision timing
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        execution_time = (end_time - start_time) * 1000  # Convert seconds to milliseconds
+        return result, execution_time
+    return wrapper
+
+# Measure time and space costs
+find_subgraphs_timed = measure_time(find_subgraphs)
+subgraphs, execution_time = find_subgraphs_timed(initial_graph, merge_graph)
+# Unpack the result tuple to get subgraphs and memory usage
+subgraphs, memory_usage = subgraphs
+
+# Print results
+print("merge:", subgraphs)
+print("Subgraphs found:", len(subgraphs))
+print("Execution time:", execution_time, "ms")
+print("Memory usage during find_subgraphs:", memory_usage, "MB")
